@@ -1,0 +1,21 @@
+version: "3.9"
+services:
+  api:
+    build: ./api
+    ports: ["8000:8000"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WORKER_URL=http://worker:3000
+    volumes:
+      - ./data:/data
+      - ./templates:/app/templates
+    depends_on: [worker]
+
+  worker:
+    build: ./worker
+    ports: ["3000:3000"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/data
+      - ./templates:/app/templates
