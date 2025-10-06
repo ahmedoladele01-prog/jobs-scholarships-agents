@@ -14,7 +14,7 @@ const app = express();
 app.use(bodyParser.json());
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-// Data dirs (inside container). On Render these are ephemeral unless you attach a disk.
+// Data dirs
 const DATA_DIR = '/data';
 const PROFILE_DIR = path.join(DATA_DIR, 'profile');
 const CV_DIR = path.join(DATA_DIR, 'cv');
@@ -24,7 +24,7 @@ const LOG_DIR = path.join(DATA_DIR, 'logs');
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'worker' }));
 
-// --- Demo form so you can safely test end-to-end ---
+// Demo form for safe testing
 const PUBLIC_DIR = path.join(__dirname, 'public');
 fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 if (!fs.existsSync(path.join(PUBLIC_DIR, 'demo-form.html'))) {
@@ -48,13 +48,12 @@ if (!fs.existsSync(path.join(PUBLIC_DIR, 'ok.html'))) {
 }
 app.get('/demo-form', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'demo-form.html')));
 
-// --- Profile loader with safe fallback ---
+// Load profile
 function loadProfile(profileId){
   try {
     const p = path.join(PROFILE_DIR, `${profileId}.json`);
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch {}
-  // Fallback default if no profile file mounted
   return {
     fullName: 'Ahmed Oladele, MBA',
     email: 'ahmed.oladele01@gmail.com',
@@ -76,9 +75,15 @@ function loadProfile(profileId){
   };
 }
 
-// --- Render CV → PDF using Handlebars template file ---
-async function renderCvToPdf(profile, targetRole='General Role'){
+// Render CV PDF (with optional bullets override)
+async function renderCvToPdf(profile, targetRole='General Role', bulletsOverride=null){
   const tplPath = path.join(__dirname, 'templates', 'cv', 'modern.hbs');
+
+  if (bulletsOverride && Array.isArray(bulletsOverride) && profile?.experience?.length) {
+    profile = JSON.parse(JSON.stringify(profile));
+    profile.experience[0].bullets = bulletsOverride;
+  }
+
   const tplStr = fs.readFileSync(tplPath, 'utf8');
   const html = Handlebars.compile(tplStr)({ resume: profile, targetRole });
 
@@ -90,8 +95,7 @@ async function renderCvToPdf(profile, targetRole='General Role'){
   const fpath = path.join(CV_DIR, fname);
 
   const pdf = await page.pdf({
-    format: 'A4',
-    printBackground: true,
+    format: 'A4', printBackground: true,
     margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' }
   });
   fs.writeFileSync(fpath, pdf);
@@ -99,13 +103,14 @@ async function renderCvToPdf(profile, targetRole='General Role'){
   return fpath;
 }
 
-// --- Generic form-fill + file upload with Playwright ---
+// Form fill + upload
 async function fillForm(url, profile, pdfPath){
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1366, height: 768 } });
   const page = await context.newPage();
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
   const tryFill = async (locator, value) => {
     try { if (await locator.count()) await locator.first().fill(value); } catch {}
   };
@@ -113,7 +118,7 @@ async function fillForm(url, profile, pdfPath){
   await tryFill(page.getByLabel(/email/i), profile.email);
   await tryFill(page.getByLabel(/phone|mobile/i), profile.phone);
 
-  // Upload CV file
+  // Upload file
   const input = page.locator('input[type=file]');
   if (await input.count()) {
     await input.setInputFiles(pdfPath);
@@ -127,7 +132,7 @@ async function fillForm(url, profile, pdfPath){
     } catch {}
   }
 
-  // Try submit
+  // Submit
   const submit = page.getByRole('button', { name: /submit|apply|send/i });
   if (await submit.count()) await submit.first().click();
 
@@ -135,23 +140,32 @@ async function fillForm(url, profile, pdfPath){
   await page.waitForTimeout(1500);
   const proofPath = path.join(PROOF_DIR, `proof_${Date.now()}.png`);
   await page.screenshot({ path: proofPath, fullPage: true });
+
   const content = await page.content();
   await browser.close();
   return { proofPath, snippet: content.slice(0, 1000) };
 }
 
-// --- Public API used by the FastAPI backend ---
+// Busy lock so only one job runs at a time
+let isBusy = false;
+
 app.post('/apply', express.json(), async (req, res) => {
+  if (isBusy) {
+    return res.status(429).json({ ok: false, error: "Worker busy, try again in ~60 seconds." });
+  }
+  isBusy = true;
   try {
-    const { url, profile_id='ahmed', target_role='General Role' } = req.body || {};
+    const { url, profile_id='ahmed', target_role='General Role', bullets=null } = req.body || {};
     const profile = loadProfile(profile_id);
-    const pdfPath = await renderCvToPdf(profile, target_role);
+    const pdfPath = await renderCvToPdf(profile, target_role, bullets);
     const result = await fillForm(url, profile, pdfPath);
     res.json({ ok: true, pdfPath, proof: result.proofPath, htmlSnippet: result.snippet });
   } catch (e) {
     console.error(e);
     fs.writeFileSync(path.join(LOG_DIR, 'error.log'), String(e)+"\n", { flag: 'a' });
     res.status(500).json({ ok: false, error: String(e) });
+  } finally {
+    isBusy = false;
   }
 });
 
